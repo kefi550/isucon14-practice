@@ -14,5 +14,4 @@ ff02::3 ip6-allhosts
 # END ANSIBLE MANAGED BLOCK
 
 
-10.0.52.164 monitor
-10.0.23.64 isu2
+10.0.44.107 isu1

@@ -1,0 +1,34 @@
+# Flush all mysql server logs together using mysqladmin flush-logs.
+# mysqld must be active for the script to run successfully.
+/var/log/mysql.log /var/log/mysql/*log {
+	daily
+	rotate 7
+	missingok
+	create 640 mysql adm
+	su mysql adm
+	compress
+	sharedscripts
+	postrotate
+		# Confirm that the mysql service is running and that mysqladmin
+		# exists as it is needed for flushing logs. If not, ignore this
+		# rotation as mysql-server has likely been removed or is inactive.
+		systemctl is-active --quiet mysql || exit 0
+		test -x /usr/bin/mysqladmin || exit 0
+
+		# Run mysqladmin using the debian.cnf configuration to rotate logs.
+		MYADMIN="/usr/bin/mysqladmin --defaults-file=/etc/mysql/debian.cnf"
+
+		# Ping mysqld to confirm it is responsive, which is required for flushing.
+		$MYADMIN ping >/dev/null 2>&1
+		PING_STATUS_CODE=$?
+
+		if [ "${PING_STATUS_CODE}" -eq "0" ]; then
+			# Flush all server logs.
+			$MYADMIN flush-logs
+		else
+			# The server is down, or debian.cnf is bad. Return error to show
+			# that the logs could not be flushed.
+			exit 1
+		fi
+	endscript
+}

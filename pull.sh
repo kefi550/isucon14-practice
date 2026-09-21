@@ -13,7 +13,7 @@ rsync -avr isu1:~/webapp/sql/ "${LOCAL_PATH}/webapp/sql/"
 # envの代表としてisu1だけとる
 rsync -avr isu1:~/env.sh "${LOCAL_PATH}/env.sh"
 
-for i in $(seq 1 1); do
+for i in $(seq 1 2); do
   host="isu${i}"
   mkdir -p ${LOCAL_PATH}/${host}/etc/systemd/system/
   rsync -avr ${host}:/etc/hosts "${LOCAL_PATH}/${host}/etc/"
