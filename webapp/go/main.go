@@ -39,6 +39,11 @@ func main() {
 	}()
 
 	mux := setup()
+	// トラフィックを受ける前に、椅子ごとの今のライドをDBから読み込む
+	if err := loadChairRides(context.Background()); err != nil {
+		slog.Error("failed to load chair rides", "error", err)
+		os.Exit(1)
+	}
 	startMatcher(context.Background(), runMatching)
 	startMatchStateReloader(context.Background())
 	slog.Info("Listening on :8080")
@@ -162,6 +167,7 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 
 	// DBを作り直している間は、マッチングを止める。終わったら、古い状態を捨てて、DBから読み直させる
 	matchState.initializing.Store(true)
+	chairRides.invalidate()
 	defer func() {
 		matchState.invalidate()
 		matchState.initializing.Store(false)
@@ -174,6 +180,12 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := db.ExecContext(ctx, "UPDATE settings SET value = ? WHERE name = 'payment_gateway_url'", req.PaymentServer); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	// 初期化したDBから、椅子ごとの今のライドを読み込む（この間、まだトラフィックは来ない）
+	if err := loadChairRides(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}

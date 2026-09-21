@@ -132,31 +132,46 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	matchState.setLocation(chair.ID, req.Latitude, req.Longitude)
 
 	rideStatusAdded := false
-	ride := &chairLatestRide{}
-	if err := db.GetContext(ctx, ride, `
+	rideUserID := ""
+	if chairRides.isLoaded() {
+		// ライドの状態はメモリに持っているため、DBを読まずに、到着（PICKUP、ARRIVED）を判定できる
+		if cr, ok := chairRides.get(chair.ID); ok {
+			rideUserID = cr.UserID
+			if from, to, arrived := decideArrival(cr, req.Latitude, req.Longitude); arrived {
+				// 同じ椅子から位置更新が重なっても、ステータスを二重に追加しない
+				if chairRides.transition(chair.ID, cr.RideID, from, to) {
+					if _, err := db.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), cr.RideID, to); err != nil {
+						chairRides.transition(chair.ID, cr.RideID, to, from)
+						writeError(w, http.StatusInternalServerError, err)
+						return
+					}
+					rideStatusAdded = true
+				}
+			}
+		}
+	} else {
+		ride := &chairLatestRide{}
+		if err := db.GetContext(ctx, ride, `
 SELECT r.*,
        (SELECT s.status FROM ride_statuses s WHERE s.ride_id = r.id ORDER BY s.ride_id DESC, s.created_at DESC LIMIT 1) AS latest_status
 FROM rides r
 WHERE r.chair_id = ?
 ORDER BY r.updated_at DESC
 LIMIT 1`, chair.ID); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-	} else {
-		status := ride.LatestStatus.String
-		if status != "COMPLETED" && status != "CANCELED" {
-			if req.Latitude == ride.PickupLatitude && req.Longitude == ride.PickupLongitude && status == "ENROUTE" {
-				if _, err := db.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "PICKUP"); err != nil {
-					writeError(w, http.StatusInternalServerError, err)
-					return
-				}
-				rideStatusAdded = true
+			if !errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusInternalServerError, err)
+				return
 			}
-
-			if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && status == "CARRYING" {
-				if _, err := db.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "ARRIVED"); err != nil {
+		} else {
+			rideUserID = ride.UserID
+			if _, to, arrived := decideArrival(chairRide{
+				Status:               ride.LatestStatus.String,
+				PickupLatitude:       ride.PickupLatitude,
+				PickupLongitude:      ride.PickupLongitude,
+				DestinationLatitude:  ride.DestinationLatitude,
+				DestinationLongitude: ride.DestinationLongitude,
+			}, req.Latitude, req.Longitude); arrived {
+				if _, err := db.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, to); err != nil {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
@@ -167,7 +182,7 @@ LIMIT 1`, chair.ID); err != nil {
 
 	if rideStatusAdded {
 		chairNotifier.notify(chair.ID)
-		userNotifier.notify(ride.UserID)
+		userNotifier.notify(rideUserID)
 	}
 
 	writeJSON(w, http.StatusOK, &chairPostCoordinateResponse{
@@ -363,6 +378,11 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if req.Status == "ENROUTE" || req.Status == "CARRYING" {
+		if !chairRides.setStatus(chair.ID, ride.ID, req.Status) {
+			refreshChairRide(ctx, chair.ID)
+		}
 	}
 	chairNotifier.notify(chair.ID)
 	userNotifier.notify(ride.UserID)

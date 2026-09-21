@@ -270,7 +270,7 @@ func (ms *matchStateStore) plan() []matchedPair {
 
 	pairs := make([]matchedPair, 0, n)
 	for i, j := range assignment {
-		pairs = append(pairs, matchedPair{rideID: ms.pending[i].ride.ID, chairID: candidates[j].ID})
+		pairs = append(pairs, matchedPair{rideID: ms.pending[i].ride.ID, chairID: candidates[j].ID, ride: ms.pending[i].ride})
 	}
 	return pairs
 }

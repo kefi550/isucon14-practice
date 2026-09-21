@@ -19,6 +19,7 @@ type matchingChair struct {
 type matchedPair struct {
 	rideID  string
 	chairID string
+	ride    *Ride
 }
 
 // マッチングの結果を、1回のUPDATEでまとめて保存するためのクエリを作る。
@@ -84,6 +85,9 @@ func runMatching(ctx context.Context) error {
 		return err
 	}
 	matchState.applyAssigned(pairs)
+	for _, p := range pairs {
+		chairRides.assign(p.chairID, p.ride)
+	}
 
 	// 保存できてから、椅子に通知する
 	for _, p := range pairs {

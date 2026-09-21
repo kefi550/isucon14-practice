@@ -656,6 +656,9 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 	}
 	userNotifier.notify(ride.UserID)
 	if ride.ChairID.Valid {
+		if !chairRides.setStatus(ride.ChairID.String, ride.ID, "COMPLETED") {
+			refreshChairRide(ctx, ride.ChairID.String)
+		}
 		chairNotifier.notify(ride.ChairID.String)
 	}
 
