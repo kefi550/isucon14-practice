@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"errors"
 	"net/http"
 
 	"github.com/jmoiron/sqlx"
@@ -16,17 +15,36 @@ type matchingChair struct {
 	Longitude sql.NullInt64 `db:"longitude"`
 }
 
+// 乗車位置までの移動時間（距離 / 速度）が最も短い椅子の、candidates 内の位置を返す
+func pickNearestChair(ride *Ride, candidates []*matchingChair) int {
+	best := -1
+	var bestETA float64
+	for i, c := range candidates {
+		// 位置情報がまだ無い椅子は、他に候補がある限り後回しにする
+		eta := 1e18
+		if c.Latitude.Valid && c.Longitude.Valid {
+			distance := calculateDistance(ride.PickupLatitude, ride.PickupLongitude, int(c.Latitude.Int64), int(c.Longitude.Int64))
+			eta = float64(distance) / float64(max(c.Speed, 1))
+		}
+		if best < 0 || eta < bestETA || (eta == bestETA && c.Speed > candidates[best].Speed) {
+			best = i
+			bestETA = eta
+		}
+	}
+	return best
+}
+
 // このAPIをインスタンス内から一定間隔で叩かせることで、椅子とライドをマッチングさせる
 func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	// MEMO: 最も待たせているリクエストに、乗車位置に最も早く着けそうな空いている椅子をマッチさせる
-	ride := &Ride{}
-	if err := db.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id IS NULL ORDER BY created_at LIMIT 1`); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
+	// MEMO: 待たせている順に、乗車位置に最も早く着けそうな空いている椅子をマッチさせる。1回の呼び出しで、空いている椅子がある限り複数のライドを処理する
+	rides := []*Ride{}
+	if err := db.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE chair_id IS NULL ORDER BY created_at`); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if len(rides) == 0 {
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
@@ -74,9 +92,8 @@ HAVING COUNT(s.chair_sent_at) < 6`, chairIDs)
 		busy[id] = struct{}{}
 	}
 
-	// 空いている椅子のうち、乗車位置までの移動時間（距離 / 速度）が最も短いものを選ぶ
-	var matched *matchingChair
-	var matchedETA float64
+	// 空いている椅子を候補にする
+	candidates := make([]*matchingChair, 0, len(activeChairs))
 	seen := make(map[string]struct{}, len(activeChairs))
 	for i := range activeChairs {
 		c := &activeChairs[i]
@@ -88,26 +105,23 @@ HAVING COUNT(s.chair_sent_at) < 6`, chairIDs)
 			continue
 		}
 		seen[c.ID] = struct{}{}
-
-		// 位置情報がまだ無い椅子は、他に候補がある限り後回しにする
-		eta := 1e18
-		if c.Latitude.Valid && c.Longitude.Valid {
-			distance := calculateDistance(ride.PickupLatitude, ride.PickupLongitude, int(c.Latitude.Int64), int(c.Longitude.Int64))
-			eta = float64(distance) / float64(max(c.Speed, 1))
-		}
-		if matched == nil || eta < matchedETA || (eta == matchedETA && c.Speed > matched.Speed) {
-			matched = c
-			matchedETA = eta
-		}
-	}
-	if matched == nil {
-		w.WriteHeader(http.StatusNoContent)
-		return
+		candidates = append(candidates, c)
 	}
 
-	if _, err := db.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ?", matched.ID, ride.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+	for _, ride := range rides {
+		if len(candidates) == 0 {
+			break
+		}
+
+		i := pickNearestChair(ride, candidates)
+		if _, err := db.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ?", candidates[i].ID, ride.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		// マッチした椅子はこの呼び出しの間は空いていないものとして扱う
+		candidates[i] = candidates[len(candidates)-1]
+		candidates = candidates[:len(candidates)-1]
 	}
 
 	w.WriteHeader(http.StatusNoContent)
