@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	crand "crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -10,16 +11,33 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"time"
 
+	"github.com/XSAM/otelsql"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
+	"github.com/riandyrn/otelchi"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
 var db *sqlx.DB
 
 func main() {
+	shutdown, err := initTelemetry(context.Background())
+	if err != nil {
+		slog.Error("failed to init telemetry", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdown(ctx); err != nil {
+			slog.Error("failed to shutdown telemetry", "error", err)
+		}
+	}()
+
 	mux := setup()
 	slog.Info("Listening on :8080")
 	http.ListenAndServe(":8080", mux)
@@ -59,13 +77,21 @@ func setup() http.Handler {
 	dbConfig.DBName = dbname
 	dbConfig.ParseTime = true
 
-	_db, err := sqlx.Connect("mysql", dbConfig.FormatDSN())
+	sqlDB, err := otelsql.Open("mysql", dbConfig.FormatDSN(),
+		otelsql.WithAttributes(semconv.DBSystemMySQL),
+		otelsql.WithSpanOptions(otelsql.SpanOptions{OmitConnResetSession: true, OmitConnPrepare: true}),
+	)
 	if err != nil {
+		panic(err)
+	}
+	_db := sqlx.NewDb(sqlDB, "mysql")
+	if err := _db.Ping(); err != nil {
 		panic(err)
 	}
 	db = _db
 
 	mux := chi.NewRouter()
+	mux.Use(otelchi.Middleware("isuride", otelchi.WithRequestMethodInSpanName(true)))
 	mux.Use(middleware.Logger)
 	mux.Use(middleware.Recoverer)
 	mux.HandleFunc("POST /api/initialize", postInitialize)
