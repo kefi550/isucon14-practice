@@ -27,18 +27,21 @@ import (
 var db *sqlx.DB
 
 func main() {
-	shutdown, err := initTelemetry(context.Background())
-	if err != nil {
-		slog.Error("failed to init telemetry", "error", err)
-		os.Exit(1)
-	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := shutdown(ctx); err != nil {
-			slog.Error("failed to shutdown telemetry", "error", err)
-		}
-	}()
+	// テレメトリ（OTLPへのトレース送信）は無効にしている。
+	// TracerProvider を設定しなければ、otelchi、otelsql、otelhttp は、スパンを記録も送信もしない。
+	// 元に戻すときは、次のコメントアウトを外す（telemetry.go の initTelemetry を呼ぶ）
+	// shutdown, err := initTelemetry(context.Background())
+	// if err != nil {
+	// 	slog.Error("failed to init telemetry", "error", err)
+	// 	os.Exit(1)
+	// }
+	// defer func() {
+	// 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// 	defer cancel()
+	// 	if err := shutdown(ctx); err != nil {
+	// 		slog.Error("failed to shutdown telemetry", "error", err)
+	// 	}
+	// }()
 
 	mux := setup()
 	// トラフィックを受ける前に、椅子ごとの今のライドをDBから読み込む
