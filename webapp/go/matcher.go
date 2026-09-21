@@ -17,6 +17,9 @@ const (
 	matchingSafetyInterval = 150 * time.Millisecond
 	// 続けて起こされたときに、1回にまとめるための最短の間隔
 	matchingMinInterval = 10 * time.Millisecond
+	// 合図を受けてから実行するまでに待つ時間。この間に届いた合図（ライドの作成や、椅子が空いたこと）をまとめて、
+	// 複数のライドを同時に、より良い組み合わせで割り当てる
+	matchingBatchWindow = 30 * time.Millisecond
 	// 読み込みが必要かどうかを、確認する間隔
 	matchStateReloadCheckInterval = 50 * time.Millisecond
 	// この時間を超えた実行を、遅いものとしてログに出す
@@ -42,6 +45,16 @@ func startMatcher(ctx context.Context, run func(context.Context) error) {
 			case <-ctx.Done():
 				return
 			case <-matchTrigger:
+				// 少し待って、この間に届いた合図をまとめる
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(matchingBatchWindow):
+				}
+				select {
+				case <-matchTrigger:
+				default:
+				}
 			case <-ticker.C:
 			}
 

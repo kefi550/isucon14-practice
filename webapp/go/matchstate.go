@@ -227,7 +227,12 @@ func (ms *matchStateStore) invalidate() {
 	ms.gen++
 }
 
-// 空いている椅子に、待たせている順にライドを割り当てる計画を立てる（状態は変えない）
+// 1回の割り当ての対象にする、待機中のライドの最大数（古い順）
+const maxMatchBatch = 50
+
+// 空いている椅子に、待機中のライドを割り当てる計画を立てる（状態は変えない）。
+// 椅子が足りないときは、古いライドから順に、空いている椅子の数までを対象にする。
+// 対象のライドと椅子の間で、乗車位置までの移動時間の合計が最小になる組み合わせを選ぶ
 func (ms *matchStateStore) plan() []matchedPair {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
@@ -247,20 +252,25 @@ func (ms *matchStateStore) plan() []matchedPair {
 		}
 		candidates = append(candidates, c)
 	}
+	if len(candidates) == 0 {
+		return nil
+	}
 	// 同じ条件の椅子があっても、実行のたびに結果が変わらないようにする
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
 
-	pairs := make([]matchedPair, 0, len(ms.pending))
-	for _, pr := range ms.pending {
-		if len(candidates) == 0 {
-			break
+	n := min(len(ms.pending), len(candidates), maxMatchBatch)
+	cost := make([][]float64, n)
+	for i := 0; i < n; i++ {
+		cost[i] = make([]float64, len(candidates))
+		for j, c := range candidates {
+			cost[i][j] = matchCost(ms.pending[i].ride, c)
 		}
-		i := pickNearestChair(pr.ride, candidates)
-		pairs = append(pairs, matchedPair{rideID: pr.ride.ID, chairID: candidates[i].ID})
+	}
+	assignment := assignMinCost(cost)
 
-		// マッチした椅子は、この計画の中では空いていないものとして扱う
-		candidates[i] = candidates[len(candidates)-1]
-		candidates = candidates[:len(candidates)-1]
+	pairs := make([]matchedPair, 0, n)
+	for i, j := range assignment {
+		pairs = append(pairs, matchedPair{rideID: ms.pending[i].ride.ID, chairID: candidates[j].ID})
 	}
 	return pairs
 }

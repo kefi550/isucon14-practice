@@ -43,27 +43,22 @@ func buildAssignChairsQuery(pairs []matchedPair) (string, []any) {
 	return sb.String(), args
 }
 
-// 乗車位置までの移動時間（距離 / 速度）が最も短い椅子の、candidates 内の位置を返す
-func pickNearestChair(ride *Ride, candidates []*matchingChair) int {
-	best := -1
-	var bestETA float64
-	for i, c := range candidates {
-		// 位置情報がまだ無い椅子は、他に候補がある限り後回しにする
-		eta := 1e18
-		if c.Latitude.Valid && c.Longitude.Valid {
-			distance := calculateDistance(ride.PickupLatitude, ride.PickupLongitude, int(c.Latitude.Int64), int(c.Longitude.Int64))
-			eta = float64(distance) / float64(max(c.Speed, 1))
-		}
-		if best < 0 || eta < bestETA || (eta == bestETA && c.Speed > candidates[best].Speed) {
-			best = i
-			bestETA = eta
-		}
+// 位置情報がまだ無い椅子のコスト。他に候補がある限り、選ばれないようにする
+const noLocationCost = 1e6
+
+// ライドに椅子を割り当てるコスト。乗車位置までの移動時間（距離 / 速度）。
+// 同じ時間なら、速い椅子を優先する
+func matchCost(ride *Ride, c *matchingChair) float64 {
+	if !c.Latitude.Valid || !c.Longitude.Valid {
+		return noLocationCost
 	}
-	return best
+	distance := calculateDistance(ride.PickupLatitude, ride.PickupLongitude, int(c.Latitude.Int64), int(c.Longitude.Int64))
+	speed := max(c.Speed, 1)
+	return float64(distance)/float64(speed) - float64(speed)*1e-9
 }
 
-// マッチングを1回実行する。待たせている順に、乗車位置に最も早く着けそうな空いている椅子をマッチさせる。
-// 1回の実行で、空いている椅子がある限り複数のライドを処理する。
+// マッチングを1回実行する。待たせている順に、空いている椅子がある限り複数のライドを処理し、
+// 乗車位置までの移動時間の合計が最小になるように、椅子を割り当てる。
 // 同時に2つ走ると、同じライドや同じ椅子を二重に割り当ててしまうため、排他をかける
 func runMatching(ctx context.Context) error {
 	matchMu.Lock()
