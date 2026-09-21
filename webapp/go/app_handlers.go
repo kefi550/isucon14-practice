@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 	"github.com/oklog/ulid/v2"
 )
@@ -23,6 +24,20 @@ type appPostUsersRequest struct {
 type appPostUsersResponse struct {
 	ID             string `json:"id"`
 	InvitationCode string `json:"invitation_code"`
+}
+
+// HTTPステータスコードつきのエラー
+type httpStatusError struct {
+	status int
+	err    error
+}
+
+func (e *httpStatusError) Error() string { return e.err.Error() }
+
+// デッドロック（MySQL Error 1213）かどうか
+func isDeadlock(err error) bool {
+	var me *mysql.MySQLError
+	return errors.As(err, &me) && me.Number == 1213
 }
 
 func appPostUsers(w http.ResponseWriter, r *http.Request) {
@@ -41,83 +56,23 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 	accessToken := secureRandomStr(32)
 	invitationCode := secureRandomStr(15)
 
-	tx, err := db.BeginTxx(ctx, nil)
+	// 招待コード付きの登録が並行すると、クーポンの行ロックがデッドロックすることがあるため、その場合はやり直す
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 5 * time.Millisecond)
+		}
+		err = createUser(ctx, req, userID, accessToken, invitationCode)
+		if !isDeadlock(err) {
+			break
+		}
+	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defer tx.Rollback()
-
-	_, err = tx.ExecContext(
-		ctx,
-		"INSERT INTO users (id, username, firstname, lastname, date_of_birth, access_token, invitation_code) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		userID, req.Username, req.FirstName, req.LastName, req.DateOfBirth, accessToken, invitationCode,
-	)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	// 初回登録キャンペーンのクーポンを付与
-	_, err = tx.ExecContext(
-		ctx,
-		"INSERT INTO coupons (user_id, code, discount) VALUES (?, ?, ?)",
-		userID, "CP_NEW2024", 3000,
-	)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	// 招待コードを使った登録
-	if req.InvitationCode != nil && *req.InvitationCode != "" {
-		// 招待する側の招待数をチェック
-		var coupons []Coupon
-		err = tx.SelectContext(ctx, &coupons, "SELECT * FROM coupons WHERE code = ? FOR UPDATE", "INV_"+*req.InvitationCode)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
+		var he *httpStatusError
+		if errors.As(err, &he) {
+			writeError(w, he.status, he.err)
 			return
 		}
-		if len(coupons) >= 3 {
-			writeError(w, http.StatusBadRequest, errors.New("この招待コードは使用できません。"))
-			return
-		}
-
-		// ユーザーチェック
-		var inviter User
-		err = tx.GetContext(ctx, &inviter, "SELECT * FROM users WHERE invitation_code = ?", *req.InvitationCode)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				writeError(w, http.StatusBadRequest, errors.New("この招待コードは使用できません。"))
-				return
-			}
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-
-		// 招待クーポン付与
-		_, err = tx.ExecContext(
-			ctx,
-			"INSERT INTO coupons (user_id, code, discount) VALUES (?, ?, ?)",
-			userID, "INV_"+*req.InvitationCode, 1500,
-		)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		// 招待した人にもRewardを付与
-		_, err = tx.ExecContext(
-			ctx,
-			"INSERT INTO coupons (user_id, code, discount) VALUES (?, CONCAT(?, '_', FLOOR(UNIX_TIMESTAMP(NOW(3))*1000)), ?)",
-			inviter.ID, "RWD_"+*req.InvitationCode, 1000,
-		)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -132,6 +87,77 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 		ID:             userID,
 		InvitationCode: invitationCode,
 	})
+}
+
+func createUser(ctx context.Context, req *appPostUsersRequest, userID, accessToken, invitationCode string) error {
+	tx, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(
+		ctx,
+		"INSERT INTO users (id, username, firstname, lastname, date_of_birth, access_token, invitation_code) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		userID, req.Username, req.FirstName, req.LastName, req.DateOfBirth, accessToken, invitationCode,
+	)
+	if err != nil {
+		return err
+	}
+
+	// 初回登録キャンペーンのクーポンを付与
+	_, err = tx.ExecContext(
+		ctx,
+		"INSERT INTO coupons (user_id, code, discount) VALUES (?, ?, ?)",
+		userID, "CP_NEW2024", 3000,
+	)
+	if err != nil {
+		return err
+	}
+
+	// 招待コードを使った登録
+	if req.InvitationCode != nil && *req.InvitationCode != "" {
+		// 招待する側の招待数をチェック
+		var coupons []Coupon
+		err = tx.SelectContext(ctx, &coupons, "SELECT * FROM coupons WHERE code = ? FOR UPDATE", "INV_"+*req.InvitationCode)
+		if err != nil {
+			return err
+		}
+		if len(coupons) >= 3 {
+			return &httpStatusError{http.StatusBadRequest, errors.New("この招待コードは使用できません。")}
+		}
+
+		// ユーザーチェック
+		var inviter User
+		err = tx.GetContext(ctx, &inviter, "SELECT * FROM users WHERE invitation_code = ?", *req.InvitationCode)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return &httpStatusError{http.StatusBadRequest, errors.New("この招待コードは使用できません。")}
+			}
+			return err
+		}
+
+		// 招待クーポン付与
+		_, err = tx.ExecContext(
+			ctx,
+			"INSERT INTO coupons (user_id, code, discount) VALUES (?, ?, ?)",
+			userID, "INV_"+*req.InvitationCode, 1500,
+		)
+		if err != nil {
+			return err
+		}
+		// 招待した人にもRewardを付与
+		_, err = tx.ExecContext(
+			ctx,
+			"INSERT INTO coupons (user_id, code, discount) VALUES (?, CONCAT(?, '_', FLOOR(UNIX_TIMESTAMP(NOW(3))*1000)), ?)",
+			inviter.ID, "RWD_"+*req.InvitationCode, 1000,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
 
 type appPostPaymentMethodsRequest struct {
