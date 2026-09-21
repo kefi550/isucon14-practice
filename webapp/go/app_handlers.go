@@ -937,10 +937,10 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 }
 
 // メモリの状態から、指定の座標の近くにいる椅子を返す。
-// 配車受付中で、位置情報があり、完了していないライドを持たない椅子のうち、距離が範囲内のもの。椅子のID順
+// 配車受付中で、位置情報があり、埋まっていない（ライドを持っていて、椅子がその完了を受け取るまでの間でない）椅子のうち、距離が範囲内のもの。椅子のID順
 func nearbyChairsFromMemory(latitude, longitude, distance int) []appGetNearbyChairsResponseChair {
 	nearbyChairs := []appGetNearbyChairsResponseChair{}
-	for _, c := range matchState.activeLocatedChairs() {
+	for _, c := range matchState.idleLocatedChairs() {
 		if calculateDistance(latitude, longitude, c.Latitude, c.Longitude) > distance {
 			continue
 		}

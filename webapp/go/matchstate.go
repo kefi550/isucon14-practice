@@ -365,7 +365,9 @@ func (ms *matchStateStore) addPendingRide(ride *Ride) {
 	ms.pending = append(ms.pending, &pendingRide{ride: ride, addedAt: time.Now()})
 }
 
-// 配車受付中で、位置情報のある椅子（GET /api/app/nearby-chairs 用）
+// 配車受付中で、位置情報があり、埋まっていない椅子（GET /api/app/nearby-chairs 用）。
+// 椅子は、割り当てられたライドの完了（COMPLETED）を受け取るまで、次のライドを受けられないため、
+// 評価が済んでも、椅子がそれを受け取るまでは、埋まっているものとして返さない（マッチングの「空き」と同じ）
 type locatedChair struct {
 	ID        string
 	Name      string
@@ -374,12 +376,12 @@ type locatedChair struct {
 	Longitude int
 }
 
-func (ms *matchStateStore) activeLocatedChairs() []locatedChair {
+func (ms *matchStateStore) idleLocatedChairs() []locatedChair {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 	chairs := make([]locatedChair, 0, len(ms.chairs))
 	for _, cs := range ms.chairs {
-		if cs.Active && cs.HasLoc {
+		if cs.Active && cs.HasLoc && !cs.Busy {
 			chairs = append(chairs, locatedChair{ID: cs.ID, Name: cs.Name, Model: cs.Model, Latitude: cs.Lat, Longitude: cs.Lon})
 		}
 	}
