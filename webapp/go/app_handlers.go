@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -915,12 +916,56 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	coordinate := Coordinate{Latitude: lat, Longitude: lon}
+	// 状態をメモリに持っているときは、DBを読まずに返す
+	if matchState.isLoaded() && chairRides.isLoaded() {
+		writeJSON(w, http.StatusOK, &appGetNearbyChairsResponse{
+			Chairs:      nearbyChairsFromMemory(lat, lon, distance),
+			RetrievedAt: time.Now().UnixMilli(),
+		})
+		return
+	}
 
-	tx, err := db.BeginTxx(ctx, nil)
+	nearbyChairs, retrievedAt, err := nearbyChairsFromDB(ctx, Coordinate{Latitude: lat, Longitude: lon}, distance)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	writeJSON(w, http.StatusOK, &appGetNearbyChairsResponse{
+		Chairs:      nearbyChairs,
+		RetrievedAt: retrievedAt.UnixMilli(),
+	})
+}
+
+// メモリの状態から、指定の座標の近くにいる椅子を返す。
+// 配車受付中で、位置情報があり、完了していないライドを持たない椅子のうち、距離が範囲内のもの。椅子のID順
+func nearbyChairsFromMemory(latitude, longitude, distance int) []appGetNearbyChairsResponseChair {
+	nearbyChairs := []appGetNearbyChairsResponseChair{}
+	for _, c := range matchState.activeLocatedChairs() {
+		if calculateDistance(latitude, longitude, c.Latitude, c.Longitude) > distance {
+			continue
+		}
+		if chairRides.hasUnfinishedRide(c.ID) {
+			continue
+		}
+		nearbyChairs = append(nearbyChairs, appGetNearbyChairsResponseChair{
+			ID:    c.ID,
+			Name:  c.Name,
+			Model: c.Model,
+			CurrentCoordinate: Coordinate{
+				Latitude:  c.Latitude,
+				Longitude: c.Longitude,
+			},
+		})
+	}
+	sort.Slice(nearbyChairs, func(i, j int) bool { return nearbyChairs[i].ID < nearbyChairs[j].ID })
+	return nearbyChairs
+}
+
+// DBから、指定の座標の近くにいる椅子を返す（メモリに状態が無いときの、これまでの処理）
+func nearbyChairsFromDB(ctx context.Context, coordinate Coordinate, distance int) ([]appGetNearbyChairsResponseChair, *time.Time, error) {
+	tx, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, nil, err
 	}
 	defer tx.Rollback()
 
@@ -931,8 +976,7 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 		`SELECT * FROM chairs WHERE is_active = TRUE`,
 	)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+		return nil, nil, err
 	}
 
 	// 過去にライドが存在し、かつ、それが完了していない椅子はスキップするので、まとめて取得しておく
@@ -944,8 +988,7 @@ FROM rides r
        JOIN ride_statuses s ON s.ride_id = r.id
 WHERE s.created_at = (SELECT MAX(created_at) FROM ride_statuses WHERE ride_id = r.id)
   AND s.status <> 'COMPLETED'`); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+		return nil, nil, err
 	}
 	busy := make(map[string]struct{}, len(busyChairIDs))
 	for _, id := range busyChairIDs {
@@ -963,8 +1006,7 @@ FROM chairs c
                      ORDER BY chair_id DESC, created_at DESC
                      LIMIT 1) l
 WHERE c.is_active = TRUE`); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+		return nil, nil, err
 	}
 	latestLocations := make(map[string]*ChairLocation, len(chairLocations))
 	for i := range chairLocations {
@@ -1002,14 +1044,10 @@ WHERE c.is_active = TRUE`); err != nil {
 		`SELECT CURRENT_TIMESTAMP(6)`,
 	)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+		return nil, nil, err
 	}
 
-	writeJSON(w, http.StatusOK, &appGetNearbyChairsResponse{
-		Chairs:      nearbyChairs,
-		RetrievedAt: retrievedAt.UnixMilli(),
-	})
+	return nearbyChairs, retrievedAt, nil
 }
 
 func calculateFare(pickupLatitude, pickupLongitude, destLatitude, destLongitude int) int {

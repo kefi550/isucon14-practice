@@ -172,3 +172,12 @@ func decideArrival(r chairRide, latitude, longitude int) (from, to string, ok bo
 	}
 	return "", "", false
 }
+
+// 椅子が、完了していないライドを持っているか（GET /api/app/nearby-chairs で、その椅子を除くための判定）。
+// 今のライドの最新のステータスが COMPLETED でないとき、埋まっている
+func (s *chairRideStore) hasUnfinishedRide(chairID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.rides[chairID]
+	return ok && r.Status != "" && r.Status != "COMPLETED"
+}

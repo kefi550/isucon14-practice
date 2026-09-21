@@ -57,7 +57,7 @@ func chairPostChairs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	matchState.addChair(chairID, req.Model)
+	matchState.addChair(chairID, req.Name, req.Model)
 
 	http.SetCookie(w, &http.Cookie{
 		Path:  "/",

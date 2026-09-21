@@ -21,6 +21,8 @@ const matchStateDirtyReloadMinInterval = 100 * time.Millisecond
 
 type chairState struct {
 	ID     string
+	Name   string
+	Model  string
 	Speed  int
 	Active bool // 配車受付中か
 	HasLoc bool
@@ -74,6 +76,8 @@ type matchSnapshot struct {
 
 type snapshotChair struct {
 	ID        string        `db:"id"`
+	Name      string        `db:"name"`
+	Model     string        `db:"model"`
 	Active    bool          `db:"is_active"`
 	Speed     int           `db:"speed"`
 	Latitude  sql.NullInt64 `db:"latitude"`
@@ -85,7 +89,7 @@ func loadMatchSnapshot(ctx context.Context) (*matchSnapshot, error) {
 	snap := &matchSnapshot{busy: map[string]struct{}{}, speeds: map[string]int{}}
 
 	if err := db.SelectContext(ctx, &snap.chairs, `
-SELECT c.id, c.is_active, COALESCE(m.speed, 1) AS speed, l.latitude, l.longitude
+SELECT c.id, c.name, c.model, c.is_active, COALESCE(m.speed, 1) AS speed, l.latitude, l.longitude
 FROM chairs c
        LEFT JOIN chair_models m ON m.name = c.model
        LEFT JOIN LATERAL (SELECT latitude, longitude
@@ -162,7 +166,7 @@ func (ms *matchStateStore) applySnapshot(snap *matchSnapshot, startedAt time.Tim
 	chairs := make(map[string]*chairState, len(snap.chairs))
 	for _, sc := range snap.chairs {
 		_, busy := snap.busy[sc.ID]
-		cs := &chairState{ID: sc.ID, Speed: sc.Speed, Active: sc.Active, Busy: busy}
+		cs := &chairState{ID: sc.ID, Name: sc.Name, Model: sc.Model, Speed: sc.Speed, Active: sc.Active, Busy: busy}
 		if sc.Latitude.Valid && sc.Longitude.Valid {
 			cs.HasLoc, cs.Lat, cs.Lon = true, int(sc.Latitude.Int64), int(sc.Longitude.Int64)
 		}
@@ -341,7 +345,7 @@ func (ms *matchStateStore) markIdle(chairID string) {
 }
 
 // 椅子が登録された（配車受付は、まだ始めていない）
-func (ms *matchStateStore) addChair(chairID, model string) {
+func (ms *matchStateStore) addChair(chairID, name, model string) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 	if _, ok := ms.chairs[chairID]; ok {
@@ -351,7 +355,7 @@ func (ms *matchStateStore) addChair(chairID, model string) {
 	if !ok {
 		speed = 1
 	}
-	ms.chairs[chairID] = &chairState{ID: chairID, Speed: speed, addedAt: time.Now()}
+	ms.chairs[chairID] = &chairState{ID: chairID, Name: name, Model: model, Speed: speed, addedAt: time.Now()}
 }
 
 // ライドが作られた
@@ -359,4 +363,25 @@ func (ms *matchStateStore) addPendingRide(ride *Ride) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 	ms.pending = append(ms.pending, &pendingRide{ride: ride, addedAt: time.Now()})
+}
+
+// 配車受付中で、位置情報のある椅子（GET /api/app/nearby-chairs 用）
+type locatedChair struct {
+	ID        string
+	Name      string
+	Model     string
+	Latitude  int
+	Longitude int
+}
+
+func (ms *matchStateStore) activeLocatedChairs() []locatedChair {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	chairs := make([]locatedChair, 0, len(ms.chairs))
+	for _, cs := range ms.chairs {
+		if cs.Active && cs.HasLoc {
+			chairs = append(chairs, locatedChair{ID: cs.ID, Name: cs.Name, Model: cs.Model, Latitude: cs.Lat, Longitude: cs.Lon})
+		}
+	}
+	return chairs
 }
