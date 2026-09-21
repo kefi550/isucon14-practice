@@ -85,6 +85,10 @@ func setup() http.Handler {
 		panic(err)
 	}
 	_db := sqlx.NewDb(sqlDB, "mysql")
+	// 既定ではアイドル接続を2本しか保持しないため、同時リクエストが多いと接続の作り直しが頻発する
+	_db.SetMaxOpenConns(100)
+	_db.SetMaxIdleConns(100)
+	_db.SetConnMaxLifetime(5 * time.Minute)
 	if err := _db.Ping(); err != nil {
 		panic(err)
 	}
