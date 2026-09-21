@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"log/slog"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -17,14 +19,29 @@ const (
 	matchingSafetyInterval = 150 * time.Millisecond
 	// 続けて起こされたときに、1回にまとめるための最短の間隔
 	matchingMinInterval = 10 * time.Millisecond
-	// 合図を受けてから実行するまでに待つ時間。この間に届いた合図（ライドの作成や、椅子が空いたこと）をまとめて、
-	// 複数のライドを同時に、より良い組み合わせで割り当てる
-	matchingBatchWindow = 30 * time.Millisecond
 	// 読み込みが必要かどうかを、確認する間隔
 	matchStateReloadCheckInterval = 50 * time.Millisecond
 	// この時間を超えた実行を、遅いものとしてログに出す
 	matchingSlowThreshold = 100 * time.Millisecond
 )
+
+// 合図を受けてから実行するまでに待つ時間。この間に届いた合図（ライドの作成や、椅子が空いたこと）をまとめて、
+// 複数のライドを同時に、より良い組み合わせで割り当てる。待つほど、より近い椅子が空く機会が増えるが、マッチングの待ちは伸びる。
+// 環境変数 ISUCON_MATCHING_BATCH_WINDOW_MS（ミリ秒）で変えられる
+var matchingBatchWindow = durationFromEnvMs("ISUCON_MATCHING_BATCH_WINDOW_MS", 100*time.Millisecond)
+
+func durationFromEnvMs(name string, def time.Duration) time.Duration {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	ms, err := strconv.Atoi(v)
+	if err != nil || ms < 0 {
+		slog.Warn("invalid duration in environment variable; using the default", "name", name, "value", v, "default", def.String())
+		return def
+	}
+	return time.Duration(ms) * time.Millisecond
+}
 
 // マッチングが必要になる出来事（ライドの作成、椅子が空いた、椅子が配車受付を始めた）のあとに呼ぶ。
 // すでに起こす合図が出ているときは何もしない
