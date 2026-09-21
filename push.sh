@@ -16,6 +16,6 @@ for i in $(seq 1); do
   echo $host
   rsync -avr "${LOCAL_PATH}/webapp/go/" ${host}:~/webapp/go/
   rsync -avr "${LOCAL_PATH}/env.sh" ${host}:~/env.sh
-  ssh ${host} 'bash -l -c "sudo logrotate -f /etc/logrotate.conf; export PATH=/home/isucon/local/go/bin:/home/isucon/go/bin:\$PATH; cd ~/webapp/go; rm isuride; go build; sudo systemctl restart isuride-go.service;"'
+  ssh ${host} 'bash -l -c "sudo logrotate -f /etc/logrotate.conf; export PATH=/home/isucon/local/go/bin:/home/isucon/go/bin:\$PATH; cd ~/webapp/go; rm isuride; go build -o isuride; sudo systemctl restart isuride-go.service;"'
 done
 
