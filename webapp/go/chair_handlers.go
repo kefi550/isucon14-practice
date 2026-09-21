@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/oklog/ulid/v2"
 )
@@ -95,6 +96,12 @@ type chairPostCoordinateResponse struct {
 	RecordedAt int64 `json:"recorded_at"`
 }
 
+// 椅子の最新のライドと、そのライドの最新のステータス
+type chairLatestRide struct {
+	Ride
+	LatestStatus sql.NullString `db:"latest_status"`
+}
+
 func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	req := &Coordinate{}
@@ -105,45 +112,36 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 
 	chair := ctx.Value("chair").(*Chair)
 
-	tx, err := db.BeginTxx(ctx, nil)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defer tx.Rollback()
-
-	chairLocationID := ulid.Make().String()
-	if _, err := tx.ExecContext(
+	// 椅子は位置更新の成功を確認するまで移動しないため、応答までの往復を減らす。
+	// 記録日時は読み戻さず、ここで決めた値をそのまま保存して返す
+	recordedAt := time.Now().UTC().Truncate(time.Microsecond)
+	if _, err := db.ExecContext(
 		ctx,
-		`INSERT INTO chair_locations (id, chair_id, latitude, longitude) VALUES (?, ?, ?, ?)`,
-		chairLocationID, chair.ID, req.Latitude, req.Longitude,
+		`INSERT INTO chair_locations (id, chair_id, latitude, longitude, created_at) VALUES (?, ?, ?, ?, ?)`,
+		ulid.Make().String(), chair.ID, req.Latitude, req.Longitude, recordedAt,
 	); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	location := &ChairLocation{}
-	if err := tx.GetContext(ctx, location, `SELECT * FROM chair_locations WHERE id = ?`, chairLocationID); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
 	rideStatusAdded := false
-	ride := &Ride{}
-	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
+	ride := &chairLatestRide{}
+	if err := db.GetContext(ctx, ride, `
+SELECT r.*,
+       (SELECT s.status FROM ride_statuses s WHERE s.ride_id = r.id ORDER BY s.ride_id DESC, s.created_at DESC LIMIT 1) AS latest_status
+FROM rides r
+WHERE r.chair_id = ?
+ORDER BY r.updated_at DESC
+LIMIT 1`, chair.ID); err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 	} else {
-		status, err := getLatestRideStatus(ctx, tx, ride.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
+		status := ride.LatestStatus.String
 		if status != "COMPLETED" && status != "CANCELED" {
 			if req.Latitude == ride.PickupLatitude && req.Longitude == ride.PickupLongitude && status == "ENROUTE" {
-				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "PICKUP"); err != nil {
+				if _, err := db.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "PICKUP"); err != nil {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
@@ -151,7 +149,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && status == "CARRYING" {
-				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "ARRIVED"); err != nil {
+				if _, err := db.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "ARRIVED"); err != nil {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
@@ -160,17 +158,13 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
 	if rideStatusAdded {
 		chairNotifier.notify(chair.ID)
 		userNotifier.notify(ride.UserID)
 	}
 
 	writeJSON(w, http.StatusOK, &chairPostCoordinateResponse{
-		RecordedAt: location.CreatedAt.UnixMilli(),
+		RecordedAt: recordedAt.UnixMilli(),
 	})
 }
 
