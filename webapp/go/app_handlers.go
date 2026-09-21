@@ -215,77 +215,67 @@ type getAppRidesResponseItemChair struct {
 	Model string `json:"model"`
 }
 
+// 完了済みのライドと、その椅子、オーナー、クーポンの割引額（1回の検索で取得する）
+type appRideRow struct {
+	ID                   string        `db:"id"`
+	PickupLatitude       int           `db:"pickup_latitude"`
+	PickupLongitude      int           `db:"pickup_longitude"`
+	DestinationLatitude  int           `db:"destination_latitude"`
+	DestinationLongitude int           `db:"destination_longitude"`
+	Evaluation           sql.NullInt64 `db:"evaluation"`
+	CreatedAt            time.Time     `db:"created_at"`
+	UpdatedAt            time.Time     `db:"updated_at"`
+	ChairID              string        `db:"chair_id"`
+	ChairName            string        `db:"chair_name"`
+	ChairModel           string        `db:"chair_model"`
+	OwnerName            string        `db:"owner_name"`
+	Discount             int           `db:"discount"`
+}
+
+// ユーザーの完了済み（最新のステータスが COMPLETED）のライドを、作成日時の新しい順に返す
+func getAppRidesItems(ctx context.Context, userID string) ([]getAppRidesResponseItem, error) {
+	rows := []appRideRow{}
+	if err := db.SelectContext(ctx, &rows, `
+SELECT r.id, r.pickup_latitude, r.pickup_longitude, r.destination_latitude, r.destination_longitude,
+       r.evaluation, r.created_at, r.updated_at,
+       c.id AS chair_id, c.name AS chair_name, c.model AS chair_model, o.name AS owner_name,
+       COALESCE((SELECT cp.discount FROM coupons cp WHERE cp.used_by = r.id LIMIT 1), 0) AS discount
+FROM rides r
+       JOIN chairs c ON c.id = r.chair_id
+       JOIN owners o ON o.id = c.owner_id
+WHERE r.user_id = ?
+  AND (SELECT s.status FROM ride_statuses s WHERE s.ride_id = r.id ORDER BY s.ride_id DESC, s.created_at DESC LIMIT 1) = 'COMPLETED'
+ORDER BY r.created_at DESC`, userID); err != nil {
+		return nil, err
+	}
+
+	items := make([]getAppRidesResponseItem, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, getAppRidesResponseItem{
+			ID:                    row.ID,
+			PickupCoordinate:      Coordinate{Latitude: row.PickupLatitude, Longitude: row.PickupLongitude},
+			DestinationCoordinate: Coordinate{Latitude: row.DestinationLatitude, Longitude: row.DestinationLongitude},
+			Chair: getAppRidesResponseItemChair{
+				ID:    row.ChairID,
+				Owner: row.OwnerName,
+				Name:  row.ChairName,
+				Model: row.ChairModel,
+			},
+			Fare:        fareWithDiscount(row.PickupLatitude, row.PickupLongitude, row.DestinationLatitude, row.DestinationLongitude, row.Discount),
+			Evaluation:  int(row.Evaluation.Int64),
+			RequestedAt: row.CreatedAt.UnixMilli(),
+			CompletedAt: row.UpdatedAt.UnixMilli(),
+		})
+	}
+	return items, nil
+}
+
 func appGetRides(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := ctx.Value("user").(*User)
 
-	tx, err := db.BeginTxx(ctx, nil)
+	items, err := getAppRidesItems(ctx, user.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defer tx.Rollback()
-
-	rides := []Ride{}
-	if err := tx.SelectContext(
-		ctx,
-		&rides,
-		`SELECT * FROM rides WHERE user_id = ? ORDER BY created_at DESC`,
-		user.ID,
-	); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	items := []getAppRidesResponseItem{}
-	for _, ride := range rides {
-		status, err := getLatestRideStatus(ctx, tx, ride.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		if status != "COMPLETED" {
-			continue
-		}
-
-		fare, err := calculateDiscountedFare(ctx, tx, user.ID, &ride, ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-
-		item := getAppRidesResponseItem{
-			ID:                    ride.ID,
-			PickupCoordinate:      Coordinate{Latitude: ride.PickupLatitude, Longitude: ride.PickupLongitude},
-			DestinationCoordinate: Coordinate{Latitude: ride.DestinationLatitude, Longitude: ride.DestinationLongitude},
-			Fare:                  fare,
-			Evaluation:            *ride.Evaluation,
-			RequestedAt:           ride.CreatedAt.UnixMilli(),
-			CompletedAt:           ride.UpdatedAt.UnixMilli(),
-		}
-
-		item.Chair = getAppRidesResponseItemChair{}
-
-		chair := &Chair{}
-		if err := tx.GetContext(ctx, chair, `SELECT * FROM chairs WHERE id = ?`, ride.ChairID); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		item.Chair.ID = chair.ID
-		item.Chair.Name = chair.Name
-		item.Chair.Model = chair.Model
-
-		owner := &Owner{}
-		if err := tx.GetContext(ctx, owner, `SELECT * FROM owners WHERE id = ?`, chair.OwnerID); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		item.Chair.Owner = owner.Name
-
-		items = append(items, item)
-	}
-
-	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -1092,8 +1082,12 @@ func calculateDiscountedFare(ctx context.Context, tx *sqlx.Tx, userID string, ri
 		}
 	}
 
+	return fareWithDiscount(pickupLatitude, pickupLongitude, destLatitude, destLongitude, discount), nil
+}
+
+// 割引額を適用した運賃。クーポンの割引は、固定利用料金を除いた運賃に適用され、余剰分は破棄される
+func fareWithDiscount(pickupLatitude, pickupLongitude, destLatitude, destLongitude, discount int) int {
 	meteredFare := farePerDistance * calculateDistance(pickupLatitude, pickupLongitude, destLatitude, destLongitude)
 	discountedMeteredFare := max(meteredFare-discount, 0)
-
-	return initialFare + discountedMeteredFare, nil
+	return initialFare + discountedMeteredFare
 }
