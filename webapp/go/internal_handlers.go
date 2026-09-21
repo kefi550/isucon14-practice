@@ -119,6 +119,8 @@ HAVING COUNT(s.chair_sent_at) < 6`, chairIDs)
 			return
 		}
 
+		chairNotifier.notify(candidates[i].ID)
+
 		// マッチした椅子はこの呼び出しの間は空いていないものとして扱う
 		candidates[i] = candidates[len(candidates)-1]
 		candidates = candidates[:len(candidates)-1]
