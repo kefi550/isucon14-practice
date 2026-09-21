@@ -14,12 +14,12 @@ import (
 )
 
 // initTelemetry sets up the global TracerProvider that exports spans over OTLP/gRPC.
-// The endpoint defaults to monitor:4317 (Jaeger, insecure) and can be overridden with
+// The endpoint defaults to localhost:4317 (Jaeger, insecure) and can be overridden with
 // the standard OTEL_EXPORTER_OTLP_ENDPOINT environment variable. The returned function flushes and stops the provider.
 func initTelemetry(ctx context.Context) (func(context.Context) error, error) {
 	opts := []otlptracegrpc.Option{}
 	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" && os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") == "" {
-		opts = append(opts, otlptracegrpc.WithEndpoint("monitor:4317"), otlptracegrpc.WithInsecure())
+		opts = append(opts, otlptracegrpc.WithEndpoint("localhost:4317"), otlptracegrpc.WithInsecure())
 	}
 
 	exporter, err := otlptracegrpc.New(ctx, opts...)
