@@ -39,6 +39,8 @@ func main() {
 	}()
 
 	mux := setup()
+	startMatcher(context.Background(), runMatching)
+	startMatchStateReloader(context.Background())
 	slog.Info("Listening on :8080")
 	http.ListenAndServe(":8080", mux)
 }
@@ -157,6 +159,14 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+
+	// DBを作り直している間は、マッチングを止める。終わったら、古い状態を捨てて、DBから読み直させる
+	matchState.initializing.Store(true)
+	defer func() {
+		matchState.invalidate()
+		matchState.initializing.Store(false)
+		triggerMatching()
+	}()
 
 	if out, err := exec.Command("../sql/init.sh").CombinedOutput(); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("failed to initialize: %s: %w", string(out), err))

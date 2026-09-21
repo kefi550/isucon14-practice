@@ -458,6 +458,9 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userNotifier.notify(user.ID)
+	pendingRide := ride
+	matchState.addPendingRide(&pendingRide)
+	triggerMatching()
 
 	writeJSON(w, http.StatusAccepted, &appPostRidesResponse{
 		RideID: rideID,

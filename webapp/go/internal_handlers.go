@@ -1,10 +1,10 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
-
-	"github.com/jmoiron/sqlx"
+	"strings"
 )
 
 // マッチング候補となる椅子。位置情報がまだ無い椅子は Latitude/Longitude が NULL になる
@@ -13,6 +13,34 @@ type matchingChair struct {
 	Speed     int           `db:"speed"`
 	Latitude  sql.NullInt64 `db:"latitude"`
 	Longitude sql.NullInt64 `db:"longitude"`
+}
+
+// マッチングの結果（ライドと、割り当てる椅子の組）
+type matchedPair struct {
+	rideID  string
+	chairID string
+}
+
+// マッチングの結果を、1回のUPDATEでまとめて保存するためのクエリを作る。
+// 1件ずつUPDATEすると、そのたびにコミット（fsync）が走るため、件数に比例して遅くなる
+func buildAssignChairsQuery(pairs []matchedPair) (string, []any) {
+	var sb strings.Builder
+	args := make([]any, 0, len(pairs)*3)
+	sb.WriteString("UPDATE rides SET chair_id = CASE id")
+	for _, p := range pairs {
+		sb.WriteString(" WHEN ? THEN ?")
+		args = append(args, p.rideID, p.chairID)
+	}
+	sb.WriteString(" END WHERE id IN (")
+	for i, p := range pairs {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString("?")
+		args = append(args, p.rideID)
+	}
+	sb.WriteString(")")
+	return sb.String(), args
 }
 
 // 乗車位置までの移動時間（距離 / 速度）が最も短い椅子の、candidates 内の位置を返す
@@ -34,97 +62,47 @@ func pickNearestChair(ride *Ride, candidates []*matchingChair) int {
 	return best
 }
 
-// このAPIをインスタンス内から一定間隔で叩かせることで、椅子とライドをマッチングさせる
+// マッチングを1回実行する。待たせている順に、乗車位置に最も早く着けそうな空いている椅子をマッチさせる。
+// 1回の実行で、空いている椅子がある限り複数のライドを処理する。
+// 同時に2つ走ると、同じライドや同じ椅子を二重に割り当ててしまうため、排他をかける
+func runMatching(ctx context.Context) error {
+	matchMu.Lock()
+	defer matchMu.Unlock()
+
+	// 初期化の間は、DBが作り直されているため、マッチングしない
+	if matchState.initializing.Load() {
+		return nil
+	}
+
+	// DBからの読み込みは、別のゴルーチン（startMatchStateReloader）が行う。読み込むまでは、何もしない
+	if !matchState.isLoaded() {
+		return nil
+	}
+
+	pairs := matchState.plan()
+	if len(pairs) == 0 {
+		return nil
+	}
+
+	query, args := buildAssignChairsQuery(pairs)
+	if _, err := db.ExecContext(ctx, query, args...); err != nil {
+		return err
+	}
+	matchState.applyAssigned(pairs)
+
+	// 保存できてから、椅子に通知する
+	for _, p := range pairs {
+		chairNotifier.notify(p.chairID)
+	}
+	return nil
+}
+
+// このAPIは、椅子とライドをマッチングさせる。
+// 通常はアプリ内のマッチャー（startMatcher）が必要なときに実行するため、定期的に叩く必要はない。外部から叩いても、同じ排他の下で動く
 func internalGetMatching(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	// MEMO: 待たせている順に、乗車位置に最も早く着けそうな空いている椅子をマッチさせる。1回の呼び出しで、空いている椅子がある限り複数のライドを処理する
-	rides := []*Ride{}
-	if err := db.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE chair_id IS NULL ORDER BY created_at`); err != nil {
+	if err := runMatching(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if len(rides) == 0 {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	// 配車受付中の椅子を、速度と最新の位置情報つきでまとめて取得する
-	activeChairs := []matchingChair{}
-	if err := db.SelectContext(ctx, &activeChairs, `
-SELECT c.id, COALESCE(m.speed, 1) AS speed, l.latitude, l.longitude
-FROM chairs c
-       LEFT JOIN chair_models m ON m.name = c.model
-       LEFT JOIN chair_locations l ON l.chair_id = c.id
-                                  AND l.created_at = (SELECT MAX(created_at) FROM chair_locations WHERE chair_id = c.id)
-WHERE c.is_active = TRUE`); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if len(activeChairs) == 0 {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	chairIDs := make([]string, 0, len(activeChairs))
-	for _, c := range activeChairs {
-		chairIDs = append(chairIDs, c.ID)
-	}
-
-	// 完了していないライド（椅子への6つの状態通知がすべて済んでいないライド）を持つ椅子は空いていない
-	query, args, err := sqlx.In(`
-SELECT r.chair_id
-FROM rides r
-       JOIN ride_statuses s ON s.ride_id = r.id
-WHERE r.chair_id IN (?)
-GROUP BY r.id, r.chair_id
-HAVING COUNT(s.chair_sent_at) < 6`, chairIDs)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	busyChairIDs := []string{}
-	if err := db.SelectContext(ctx, &busyChairIDs, db.Rebind(query), args...); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	busy := make(map[string]struct{}, len(busyChairIDs))
-	for _, id := range busyChairIDs {
-		busy[id] = struct{}{}
-	}
-
-	// 空いている椅子を候補にする
-	candidates := make([]*matchingChair, 0, len(activeChairs))
-	seen := make(map[string]struct{}, len(activeChairs))
-	for i := range activeChairs {
-		c := &activeChairs[i]
-		if _, ok := busy[c.ID]; ok {
-			continue
-		}
-		// 同時刻の位置情報が複数ある場合に同じ椅子が重複して返ってくるので、最初の1件だけ見る
-		if _, ok := seen[c.ID]; ok {
-			continue
-		}
-		seen[c.ID] = struct{}{}
-		candidates = append(candidates, c)
-	}
-
-	for _, ride := range rides {
-		if len(candidates) == 0 {
-			break
-		}
-
-		i := pickNearestChair(ride, candidates)
-		if _, err := db.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ?", candidates[i].ID, ride.ID); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-
-		chairNotifier.notify(candidates[i].ID)
-
-		// マッチした椅子はこの呼び出しの間は空いていないものとして扱う
-		candidates[i] = candidates[len(candidates)-1]
-		candidates = candidates[:len(candidates)-1]
-	}
-
 	w.WriteHeader(http.StatusNoContent)
 }

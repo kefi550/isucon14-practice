@@ -57,6 +57,8 @@ func chairPostChairs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	matchState.addChair(chairID, req.Model)
+
 	http.SetCookie(w, &http.Cookie{
 		Path:  "/",
 		Name:  "chair_session",
@@ -87,6 +89,10 @@ func chairPostActivity(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	matchState.setActive(chair.ID, req.IsActive)
+	if req.IsActive {
+		triggerMatching()
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -123,6 +129,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	matchState.setLocation(chair.ID, req.Latitude, req.Longitude)
 
 	rideStatusAdded := false
 	ride := &chairLatestRide{}
@@ -237,6 +244,11 @@ func fetchChairNotificationData(ctx context.Context, chair *Chair, initial bool)
 
 	if err := tx.Commit(); err != nil {
 		return nil, err
+	}
+	// 椅子がライドの完了を受け取ったので、次のライドを割り当てられるようになった
+	if yetSentRideStatus.Status == "COMPLETED" {
+		matchState.markIdle(chair.ID)
+		triggerMatching()
 	}
 
 	return &chairGetNotificationResponseData{
