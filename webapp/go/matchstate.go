@@ -16,6 +16,9 @@ import (
 // 状態をDBから読み直す間隔
 const matchStateReloadInterval = time.Second
 
+// 位置のDBへの書き込みが遅れる分の余裕（locationFlushInterval より十分長くする）
+const locationSnapshotSlack = 500 * time.Millisecond
+
 // 知らない椅子へのイベントがあったときに、早めに読み直すための最短の間隔
 const matchStateDirtyReloadMinInterval = 100 * time.Millisecond
 
@@ -178,7 +181,8 @@ func (ms *matchStateStore) applySnapshot(snap *matchSnapshot, startedAt time.Tim
 			if old.busyAt.After(startedAt) {
 				cs.Busy, cs.busyAt = old.Busy, old.busyAt
 			}
-			if old.locAt.After(startedAt) {
+			// 位置は、DBへの書き込みが遅れるため、読み込みの少し前のイベントも、DBの内容より新しいものとして残す
+			if old.locAt.After(startedAt.Add(-locationSnapshotSlack)) {
 				cs.HasLoc, cs.Lat, cs.Lon, cs.locAt = old.HasLoc, old.Lat, old.Lon, old.locAt
 			}
 		}

@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/XSAM/otelsql"
@@ -44,8 +46,19 @@ func main() {
 		slog.Error("failed to load chair rides", "error", err)
 		os.Exit(1)
 	}
+	locWriter.start(context.Background())
 	startMatcher(context.Background(), runMatching)
 	startMatchStateReloader(context.Background())
+	// 停止する前に、溜めた位置をDBに書き切る
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGINT)
+	go func() {
+		<-stop
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		locWriter.drain(ctx)
+		os.Exit(0)
+	}()
 	slog.Info("Listening on :8080")
 	http.ListenAndServe(":8080", mux)
 }
@@ -168,8 +181,11 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	// DBを作り直している間は、マッチングを止める。終わったら、古い状態を捨てて、DBから読み直させる
 	matchState.initializing.Store(true)
 	chairRides.invalidate()
+	// 初期化の前の位置を、初期化したDBに書かないように、書き込みを止めて、溜めた位置を捨てる
+	locWriter.pause()
 	defer func() {
 		matchState.invalidate()
+		locWriter.resume()
 		matchState.initializing.Store(false)
 		triggerMatching()
 	}()

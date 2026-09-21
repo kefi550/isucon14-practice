@@ -118,17 +118,17 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 
 	chair := ctx.Value("chair").(*Chair)
 
-	// 椅子は位置更新の成功を確認するまで移動しないため、応答までの往復を減らす。
-	// 記録日時は読み戻さず、ここで決めた値をそのまま保存して返す
+	// 椅子は位置更新の成功を確認するまで移動しないため、DBへの書き込みを待たずに応答する。
+	// DBへは、まとめて書く（locWriter）。最新の位置は、すぐにメモリに反映する。
+	// 記録日時は、ここで決めた値をそのまま保存して返す
 	recordedAt := time.Now().UTC().Truncate(time.Microsecond)
-	if _, err := db.ExecContext(
-		ctx,
-		`INSERT INTO chair_locations (id, chair_id, latitude, longitude, created_at) VALUES (?, ?, ?, ?, ?)`,
-		ulid.Make().String(), chair.ID, req.Latitude, req.Longitude, recordedAt,
-	); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
+	locWriter.add(locationRow{
+		ID:        ulid.Make().String(),
+		ChairID:   chair.ID,
+		Latitude:  req.Latitude,
+		Longitude: req.Longitude,
+		CreatedAt: recordedAt,
+	})
 	matchState.setLocation(chair.ID, req.Latitude, req.Longitude)
 
 	rideStatusAdded := false
