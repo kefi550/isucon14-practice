@@ -166,6 +166,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	}
 	if rideStatusAdded {
 		chairNotifier.notify(chair.ID)
+		userNotifier.notify(ride.UserID)
 	}
 
 	writeJSON(w, http.StatusOK, &chairPostCoordinateResponse{
@@ -358,6 +359,7 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chairNotifier.notify(chair.ID)
+	userNotifier.notify(ride.UserID)
 
 	w.WriteHeader(http.StatusNoContent)
 }

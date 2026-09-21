@@ -11,7 +11,7 @@ import (
 )
 
 // ライドの状態が変わったことを、SSEで待っている接続へ知らせる。
-// 状態の変更はすべてこのプロセス内で行われるため、キー（椅子ID）ごとの購読者へ通知するだけでよい
+// 状態の変更はすべてこのプロセス内で行われるため、キー（椅子ID、ユーザーID）ごとの購読者へ通知するだけでよい
 type notifier struct {
 	mu   sync.Mutex
 	subs map[string]map[chan struct{}]struct{}
@@ -52,7 +52,10 @@ func (n *notifier) notify(key string) {
 	}
 }
 
-var chairNotifier = newNotifier()
+var (
+	chairNotifier = newNotifier()
+	userNotifier  = newNotifier()
+)
 
 // 通知が漏れた場合でも、状態変更から3秒以内に届けるための確認間隔
 const notificationSafetyInterval = 2 * time.Second
